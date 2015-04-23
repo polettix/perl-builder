@@ -77,7 +77,7 @@ sub prepare_package {
    my $deployable = $myself->sibling('deployable');
    $deployable->copy('deployable');
 
-   my @companions = qw< cpanm deployable regenerate relocate installer install.sh >;
+   my @companions = qw< cpanm deployable regenerate relocate installer >;
    for my $name (@companions) {
       my $target = cwd->child($name);
       $myself->sibling($name)->copy($target)
