@@ -1,23 +1,20 @@
 #!/usr/bin/env perl
 use strict;
 use warnings;
-use Carp;
-use Pod::Usage qw< pod2usage >;
 use Getopt::Long qw< :config gnu_getopt >;
 use English qw< -no_match_vars >;
+use Cwd qw< abs_path getcwd >;
+use File::Spec::Functions
+  qw< splitpath splitdir catdir catpath rel2abs file_name_is_absolute >;
+use File::Path qw< mkpath rmtree >;
+use File::Copy qw< copy >;
 my $VERSION = '0.0.1';
-
-use Log::Log4perl::Tiny qw< :easy :no_extra_logdie_message >;
-Log::Log4perl->easy_init({level => $INFO, layout => '[%d %-5p] %m%n'});
-use Path::Tiny qw< path cwd >;
-use Cwd qw< abs_path >;
 
 my %config = ();
 GetOptions(
    \%config,
    qw<
      usage! help! man! version!
-     relocate|r=s
      >
 ) or pod2usage(-verbose => 99, -sections => 'USAGE');
 pod2usage(message => "$0 $VERSION", -verbose => 99, -sections => ' ')
@@ -28,10 +25,35 @@ pod2usage(-verbose => 99, -sections => 'USAGE|EXAMPLES|OPTIONS')
 pod2usage(-verbose => 2) if $config{man};
 
 # Script implementation here
+sub absolute {
+   my ($path) = @_;
+   return $path if file_name_is_absolute($path);
+   return rel2abs($path);
+}
+
+sub parent {
+   my ($file) = @_;
+   my ($v, $d, $n) = splitpath($file);
+   if (!length $n) {
+      my @d = splitdir($d);
+      1 while !length(pop @d);
+      $d = catdir(@d);
+   }
+   return catpath($v, $d, '');
+} ## end sub parent
+
+sub child {
+   my ($dir, @subpath) = @_;
+   my $filename = pop @subpath;
+   my ($v, $d) = splitpath($dir, 1);
+   $d = catdir(splitdir($d), @subpath) if @subpath;
+   return catpath($v, $d, $filename);
+} ## end sub child
+
 # some useful paths
-my $ME      = path(abs_path(__FILE__));
-my $MYDIR   = $ME->parent();
-my $BASEDIR = path($ENV{OLD_PWD})->absolute();
+my $ME      = absolute(__FILE__);
+my $MYDIR   = parent($ME);
+my $BASEDIR = absolute($ENV{OLD_PWD});
 
 my $pack = get_package();
 my $target = resolve_target($ARGV[0] || $pack->{name});
@@ -39,13 +61,13 @@ compile_and_install($pack, $target);
 
 sub compile_and_install {
    my ($pack, $target) = @_;
-   my $start = cwd();
-   my $build = $start->child('build');
-   $build->mkpath();
+   my $start = getcwd();
+   my $build = child($start, 'build');
+   mkdir $build or die "mkdir(): $OS_ERROR\n";
    mysystem(qw< tar xvC build -f >, $pack->{path});
 
    {
-      ccd($build->child($pack->{name}));
+      ccd(child($build, $pack->{name}));
       mysystem(
          qw<
            sh Configure
@@ -61,31 +83,50 @@ sub compile_and_install {
       ccd($start);
    }
 
-   my $site_perl = $target->child(qw< lib site_perl >);
-   $site_perl->remove_tree();
-   $site_perl->touch();
+   my $site_perl = child($target, qw< lib site_perl >);
+   rmtree($site_perl);
+   open my $fh, '>', $site_perl or die "open('$site_perl'): $OS_ERROR\n";
+   close $fh or die "close() on '$site_perl': $OS_ERROR\n";
 
    for my $ancillary (qw< cpanm relocate >) {
-      my $target_ancillary = $target->child('bin', $ancillary);
-      path($ancillary)->copy($target_ancillary);
-      relocate_script($target_ancillary, $target->child(qw< bin perl >));
+      my $target_ancillary = child($target, 'bin', $ancillary);
+      copy($ancillary, $target_ancillary);
+      relocate_script($target_ancillary, child($target, qw< bin perl >));
    }
 } ## end sub compile_and_install
 
+sub slurp_raw {
+   my ($filename) = @_;
+   open my $fh, '<:raw', $filename or die "open('$filename'): $OS_ERROR\n";
+   local $/;
+   return <$fh>;
+}
+
 sub relocate_script {
    my ($file, $perl) = @_;
-   $file = path($file);
-   my $contents = $file->slurp_raw();
-   my $fh       = $file->openw_raw();
-   print {$fh} <<"END_OF_PREAMBLE" or die "print(): $OS_ERROR";
+   my $contents = slurp_raw($file);
+   open my $fh, '>:raw', $file or die "open('$file'): $OS_ERROR\n";
+   print {$fh} <<"END_OF_PREAMBLE" or die "print(): $OS_ERROR\n";
 #!$perl
    eval 'exec $perl -S \$0 \${1+"\$@"}'
       if \$running_under_some_shell;
 END_OF_PREAMBLE
-   print {$fh} $contents or die "print(): $OS_ERROR";
-   close $fh or die "close(): $OS_ERROR";
+   print {$fh} $contents or die "print(): $OS_ERROR\n";
+   close $fh or die "close(): $OS_ERROR\n";
    return;
 } ## end sub relocate_script
+
+sub dolog {
+   print {*STDERR} @_;
+}
+
+sub INFO { return dolog(' INFO: ', @_); }
+sub WARN { return dolog(' WARN: ', @_); }
+
+sub LOGDIE {
+   dolog('FATAL: ', @_);
+   die "\n";
+}
 
 sub mysystem {
    my @command = @_;
@@ -97,9 +138,9 @@ sub mysystem {
 } ## end sub mysystem
 
 sub get_package {
-   my $it = $MYDIR->iterator();
-   while (my $item = $it->()) {
-      my $name = $item->basename();
+   opendir my $dh, $MYDIR or die "opendir('$MYDIR'): $OS_ERROR\n";
+   for my $name (readdir $dh) {
+      my $item = child($MYDIR, $name);
       my ($packname, $version) =
         $name =~ m{\A (perl- ([\d.]+)) \.tar\.(?: gz | bz2 ) \z}mxs
         or next;
@@ -117,17 +158,17 @@ sub resolve_target {
    my ($target) = @_;
 
    {
-      my $start = cwd();
-      ccd $BASEDIR;
-      $target = path($target)->absolute();
-      ccd $start;
+      my $start = getcwd();
+      ccd($BASEDIR);
+      $target = absolute($target);
+      ccd($start);
    }
 
-   if ($target->is_directory()) {
+   if (-e $target) {
       WARN "target $target already exists";
    }
    else {
-      $target->mkpath();    # will complain on errors
+      mkpath($target);    # will complain on errors
    }
    return $target;
 } ## end sub resolve_target
@@ -137,56 +178,17 @@ sub ccd {
 }
 
 __END__
-ME=$(readlink -f "$0")
-MYDIR=$(dirname "$ME")
-PACK=$(ls "$MYDIR"/perl-*.tar.*)
 
-die() {
-   echo "$*" >&2
-   exit 1
-}
+=pod
 
-packname() {
-   local fullname=$1
-   basename "$fullname" | sed 's/\.tar\.\(bz2\|gz\)$//'
-}
+=encoding utf-8
 
-resolve_target() {
-   local target=$1
-   local packfile=$2
-   if [ -z "$target" ] ; then
-      target=$(packname "$packfile")
-   fi
-   [ -n "$OLD_PWD" ] || die "OLD_PWD is empty..."
-   cd "$OLD_PWD" || die "cannot hop back into $OLDPWD"
-   [ -e "$target" ] && die "target '$target' exists"
-   mkdir -p "$target"
-   readlink -f "$target"
-}
+=head1 NAME
 
-compile_and_install() {
-   local package=$1
-   local target=$2
-   local startdir=$PWD
-   subdir=$(packname "$package")
-   mkdir build &&
-   tar xvf "$package" -C build &&
-   cd "build/$subdir" &&
-   sh Configure -des -Drelocatableinc -Dprefix="$target" &&
-   make &&
-   make install &&
-   cd "$target" &&
-   rm -rf man &&
-   cd lib &&
-   rm -rf site_perl &&
-   touch site_perl &&
-   cd "$startdir" &&
-   rm -rf build &&
-   sed -e "1s#.*#\#!$target/bin/perl#" cpanm >"$target/bin/cpanm" &&
-   chmod +x "$target/bin/cpanm"
-}
+installer - embedded script for doing the installation
 
-TARGET=$(resolve_target "$1" "$PACK")
-[ $? -eq 0 ] || die 'bailing out'
-[ -n "$TARGET" ] || die 'bailing out'
-compile_and_install "$PACK" "$TARGET" || die 'something went wrong'
+=head1 USAGE
+
+   shell$ installer
+
+=cut

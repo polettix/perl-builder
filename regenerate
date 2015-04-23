@@ -17,8 +17,7 @@ system {$deployable} $deployable, qw<
   cpanm
   deployable
   installer
-  install.sh
   relocate
   regenerate
-  -d install.sh
+  -d installer
   -o >, $target, $package;
