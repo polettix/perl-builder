@@ -188,7 +188,7 @@ __END__
 
 =head1 NAME
 
-perl-builder - [ una breve descrizione del programma ]
+perl-builder - create a perl-building Perl script
 
 =head1 VERSION
 
@@ -201,11 +201,19 @@ Ask the version number to the script itself, calling:
 
    perl-builder [--usage] [--help] [--man] [--version]
 
-   perl-builder
+   perl-builder locator
+                [--cpanm cpanm-locator]
+                [--mirror|-m URI]
+                [--output|-o path]
+                [--path|-p path]
 
 =head1 EXAMPLES
 
-   shell$ perl-builder
+   # generate perl-builder-5.20.2.pl
+   shell$ perl-builder 5.20.2
+
+
+
 
 =for l'autore, da riempire:
    Qualche breve esempio con codice che mostri l'utilizzo più comune.
