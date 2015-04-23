@@ -91,6 +91,7 @@ sub compile_and_install {
    for my $ancillary (qw< cpanm relocate >) {
       my $target_ancillary = child($target, 'bin', $ancillary);
       copy($ancillary, $target_ancillary);
+      chmod 0755, $target_ancillary;
       relocate_script($target_ancillary, child($target, qw< bin perl >));
    }
 } ## end sub compile_and_install
