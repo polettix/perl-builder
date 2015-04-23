@@ -1,0 +1,24 @@
+#!/usr/bin/env perl
+use strict;
+use File::Spec::Functions qw< splitpath catpath rel2abs >;
+use Cwd qw< abs_path >;
+
+my $target = shift || die "no target\n";
+$target = rel2abs($target);
+
+my @me    = splitpath(abs_path(__FILE__));
+my $mydir = catpath(@me[0, 1], '');
+chdir $mydir or die "chdir(): $!";
+
+my $deployable = catpath(@me[0, 1], 'deployable');
+
+my ($package) = <perl-*.tar.*>;
+system {$deployable} $deployable, qw<
+  cpanm
+  deployable
+  installer
+  install.sh
+  relocate
+  regenerate
+  -d install.sh
+  -o >, $target, $package;

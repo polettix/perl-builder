@@ -1,0 +1,162 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+my $VERSION = '0.0.1';
+
+use File::Spec::Functions
+  qw< splitpath splitdir catdir catpath rel2abs file_name_is_absolute >;
+use Cwd qw< getcwd realpath >;
+use File::stat;
+
+sub sibling {
+   my ($me, $brother) = @_;
+   my ($v, $d, $n) = splitpath($me);
+   return catpath($v, $d, $brother);
+}
+
+sub parent {
+   my ($file) = @_;
+   my ($v, $d, $n) = splitpath($file);
+   if (! length $n) {
+      my @d = splitdir($d);
+      1 while !length(pop @d);
+      $d = catdir(@d);
+   }
+   return catpath($v, $d, '');
+}
+
+sub child {
+   my ($dir, @subpath) = @_;
+   my $filename = pop @subpath;
+   my ($v, $d) = splitpath($dir, 1);
+   $d = catdir(splitdir($d), @subpath) if @subpath;
+   return catpath($v, $d, $filename);
+}
+
+sub absolute {
+   my ($path) = @_;
+   return $path if file_name_is_absolute($path);
+   return rel2abs($path);
+}
+
+sub cleandir {
+   my ($dir) = @_;
+   my ($v, $d) = splitpath($dir, 1);
+   my @d = splitdir($d);
+   pop @d if @d && ! length $d[-1];
+   my $retval = catpath($v, catdir(@d), '');
+   return $retval if $retval eq '/';
+   $retval =~ s{/+\z}{}mxs unless $retval eq '/';
+   return $retval;
+}
+
+# running under the right perl? Do so if not
+BEGIN {
+   my $this_perl     = realpath($^X);
+   my $me            = realpath(__FILE__);
+   my $expected_perl = sibling($me, 'perl');
+   if ($expected_perl ne $this_perl) {
+      warn "re-executing with $expected_perl\n";
+      exec {$expected_perl} $expected_perl, $me, @ARGV;
+   }
+} ## end BEGIN
+
+# Script implementation here
+my $me     = realpath(__FILE__);
+my $base   = parent(parent($me));
+my $target = shift;
+$target =
+    (!defined($target))            ? $base
+  : absolute($target);
+$target = cleandir($target);
+
+relocate_scripts();
+relocate_Configs();
+warn "relocation done\n";
+
+sub relocate_scripts {
+   my $target_perl = child($target, qw< bin perl >);
+   my $bin = child($base, 'bin');
+   opendir my $dh, $bin or die "opendir('$bin'): $!\n";
+   for my $item (readdir $dh) {
+      my $path = child($bin, $item);
+      next if -d $path;
+
+      open my $fh, '<:raw', $path or die "open('$path'): $!\n";
+      sysread $fh, my $start, 2 or die "sysread() from '$path': $!\n";
+      close $fh or die "close('$path'): $!\n";
+      next unless $start eq '#!';
+
+      relocate_script($path, $target_perl);
+   } ## end while (my $item = $bin_it...)
+} ## end sub relocate_scripts
+
+sub relocate_script {
+   my ($file, $perl) = @_;
+
+   open my $ifh, '<:raw', $file
+      or die "open('$file'): $!\n";
+   my @contents = <$ifh>;
+   close $ifh or die "close('$file'): $!\n";
+
+   shift @contents;
+   while ($contents[0] =~ m{^\s* eval \s* 'exec}mxs) {
+      shift @contents;
+      shift @contents;
+      shift @contents if $contents[0] =~ m{^\#!}mxs;
+   }
+
+   open my $ofh, '>:raw', $file
+      or die "open('$file'): $!\n";
+   print {$ofh} <<"END_OF_PREAMBLE" or die "print(): $!\n";
+#!$perl
+   eval 'exec $perl -S \$0 \${1+"\$@"}'
+      if \$running_under_some_shell;
+END_OF_PREAMBLE
+   print {$ofh} @contents or die "print() on '$file': $!\n";
+   close $ofh or die "close('$file'): $!\n";
+   return;
+} ## end sub relocate_script
+
+sub relocate_Configs {
+   my $arch = absolute(get_arch_dir());
+
+   my $current;
+   my $heavy = child($arch, 'Config_heavy.pl');
+   open my $fh, '<:raw', $heavy or die "open('$heavy'): $!\n";
+   while (<$fh>) {
+      ($current) = m{^ installprefix='(.*)' \s*$}mxs
+        and last;
+   }
+   close $fh or die "close('$heavy'): $!\n";
+   die "cannot find current prefix set in Config_heavy.pl\n"
+     unless defined $current;
+
+   for my $file (qw< Config.pm Config_heavy.pl >, [qw< CORE config.h>]) {
+      my $path = ref($file) ? child($arch, @$file) : child($arch, $file);
+      my $contents = do {
+         open my $fh, '<:raw', $path or die "open('$path'): $!\n";
+         local $/;
+         <$fh>;
+      };
+      $contents =~ s{$current}{$target}gmxs;
+
+      my $stat = stat($path);
+      chmod 0700, $path;
+
+      open my $fh, '>:raw', $path or die "open('$path'): $!\n";
+      print {$fh} $contents or die "print() on '$path': $!\n";
+      close $fh or die "close() on '$path': $!\n";
+
+      chmod $stat->mode(), $path;
+   } ## end for my $file (qw< Config.pm Config_heavy.pl >...)
+
+   return;
+} ## end sub relocate_Configs
+
+sub get_arch_dir {
+   for my $dir (@INC) {
+      return $dir if -e child($dir, 'Config_heavy.pl');
+   }
+   die "cannot find arch dir in \@INC (i.e. @INC)\n";
+}

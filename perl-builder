@@ -1,0 +1,334 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use Carp;
+use Pod::Usage qw< pod2usage >;
+use Getopt::Long qw< :config gnu_getopt >;
+use English qw< -no_match_vars >;
+my $VERSION = '0.0.1';
+use 5.012;
+
+use Log::Log4perl::Tiny qw< :easy :no_extra_logdie_message >;
+Log::Log4perl->easy_init({level => $INFO, layout => '[%d %-5p] %m%n'});
+use WWW::Mechanize;
+use URI;
+use File::Temp qw< tempdir >;
+use File::chdir;
+use Path::Tiny qw< path cwd >;
+use Cwd qw< abs_path >;
+
+my %config = (
+   cpanm => 'http://cpanmin.us',
+   mirror => 'http://www.cpan.org',
+   path   => '/src/5.0/',
+   myself => path(abs_path(__FILE__)),
+);
+GetOptions(
+   \%config,
+   qw<
+     usage! help! man! version!
+     cpanm=s
+     mirror|m=s
+     output|o=s
+     path|p=s
+     >
+) or pod2usage(-verbose => 99, -sections => 'USAGE');
+pod2usage(message => "$0 $VERSION", -verbose => 99, -sections => ' ')
+  if $config{version};
+pod2usage(-verbose => 99, -sections => 'USAGE') if $config{usage};
+pod2usage(-verbose => 99, -sections => 'USAGE|EXAMPLES|OPTIONS')
+  if $config{help};
+pod2usage(-verbose => 2) if $config{man};
+
+# Script implementation here
+my $wanted = shift;
+pod2usage(
+   message   => "please provide a perl version",
+   -verbose  => 99,
+   -sections => 'USAGE'
+) unless defined($wanted) && length($wanted);
+
+$config{source} = get_uri_for($wanted);
+INFO $config{source};
+prepare_package(\%config);
+
+sub prepare_package {
+   my ($c) = @_;
+
+   my $source = $c->{source};
+   my $output;
+   if (exists $c->{output}) {
+      $output = $c->{output};
+   }
+   else {
+      my ($version) = $source =~ m{perl-([\d.]+)\.tar\.(?:bz2|gz)\z}mxs;
+      $output = "perl-builder-$version.pl";
+   }
+   $output = path($output)->absolute();
+
+   my $tempdir = tempdir(CLEANUP => 1);
+   local $CWD = $tempdir;
+
+   my $filename = fetch_archive($c->{source});
+
+   fetch_cpanm($c);
+
+   my $myself = $c->{myself};
+   my $deployable = $myself->sibling('deployable');
+   $deployable->copy('deployable');
+
+   my @companions = qw< cpanm deployable regenerate relocate installer install.sh >;
+   for my $name (@companions) {
+      my $target = cwd->child($name);
+      $myself->sibling($name)->copy($target)
+         unless $target->exists();
+      $target->chmod('a=rx,u+w');
+   }
+
+   INFO "saving builder to $output";
+   my $regenerate = cwd()->child('regenerate')->absolute();
+   my @command = ($regenerate, $output);
+   system {$command[0]} @command;
+}
+
+sub fetch_archive {
+   my ($source) = @_;
+   (my $filename = $source->path()) =~ s{.*/}{}mxs;
+   INFO "downloading $source to $filename";
+   my $ua = WWW::Mechanize->new(autocheck => 1);
+   $ua->get($source, ':content_file' => $filename);
+
+   return $filename;
+}
+
+sub fetch_cpanm {
+   my ($c) = @_;
+
+   my $source = $c->{cpanm};
+   my $fallback = $c->{myself}->sibling('cpanm');
+   $source = $fallback if $source eq 'local';
+   INFO "getting cpanm from $source";
+
+   my $uri = URI->new($source);
+   if ($uri->has_recognized_scheme()) {
+      eval {
+         my $ua = WWW::Mechanize->new(autocheck => 1, timeout => 10);
+         $ua->get($uri);
+         open my $fh, '>', 'cpanm' or die "open('cpanm'): $OS_ERROR";
+         print {$fh} $ua->content() or die "print() on 'cpanm': $OS_ERROR";
+         close $fh or die "close() on 'cpanm': $OS_ERROR";;
+         INFO "success";
+         1;
+      } and return;
+   }
+   else {
+      INFO "not a recognized scheme, assuming it's a local path";
+      {
+         local $CWD = $c->{myself}->parent()->stringify();
+         $source = path($source)->absolute();
+      }
+      if ($source->is_file() && -r $source) {
+         $source->copy('cpanm');
+         return;
+      }
+   }
+
+   # fetching was not successful
+   INFO "errors fetching from $source, fallback to $fallback";
+   $fallback->copy('cpanm');
+   return;
+}
+
+sub get_uri_for {
+   my ($wanted) = @_;
+
+   # maybe a straight URI?
+   my $uri = URI->new($wanted);
+   return $uri if $uri->has_recognized_scheme();
+
+   # maybe a file?
+   if (-r $wanted) {
+      require URI::file;
+      return URI::file->new_abs($wanted);
+   }
+
+   # package name or version?
+   if (my ($wanted_version) = $wanted =~ m{\A (?:perl-)? ([\d.]+) \z}mxs) {
+      my $ua = WWW::Mechanize->new(autocheck => 1);
+      my $dir = URI->new($config{mirror});
+      $dir->path($config{path});
+
+      $ua->get($dir);
+      my $selector = qr{(?mxs: /perl- ([\d.]+) \.tar\. (bz2 | gz) \z )};
+      my %candidate_for;
+      for my $link ($ua->find_all_links(url_abs_regex => $selector)) {
+         my $uri = $link->url_abs();
+         my ($version, $format) = $uri =~ m{$selector};
+         next unless $version eq $wanted_version;
+         $candidate_for{$format} = $uri;
+      } ## end for my $link ($ua->find_all_links...)
+
+      my $selection;
+      for my $format (qw< bz2 gz >) {
+         next unless exists $candidate_for{$format};
+         $selection = $candidate_for{$format};
+         last;
+      }
+
+      LOGDIE "no candidate found for $wanted"
+         unless defined $selection;
+      return URI->new($selection);
+   }
+
+   # dunno what to do here...
+   LOGDIE "unrecognized '$wanted'";
+} ## end sub get_uri_for
+
+__END__
+
+=head1 NAME
+
+perl-builder - [ una breve descrizione del programma ]
+
+=head1 VERSION
+
+Ask the version number to the script itself, calling:
+
+   shell$ perl-builder --version
+
+
+=head1 USAGE
+
+   perl-builder [--usage] [--help] [--man] [--version]
+
+   perl-builder
+
+=head1 EXAMPLES
+
+   shell$ perl-builder
+
+=for l'autore, da riempire:
+   Qualche breve esempio con codice che mostri l'utilizzo più comune.
+   Questa sezione sarà quella probabilmente più letta, perché molti
+   utenti si annoiano a leggere tutta la documentazione, per cui
+   è meglio essere il più educativi ed esplicativi possibile.
+
+
+=head1 DESCRIPTION
+
+=for l'autore, da riempire:
+   Fornite una descrizione completa del modulo e delle sue caratteristiche.
+   Aiutatevi a strutturare il testo con le sottosezioni (=head2, =head3)
+   se necessario.
+
+
+=head1 OPTIONS
+
+=for l'autore, da riempire:
+   Una descrizione di tutte le opzioni possibili nella chiamata allo script
+
+=over
+
+=item --help
+
+print a somewhat more verbose help, showing usage, this description of
+the options and some examples from the synopsis.
+
+=item --man
+
+print out the full documentation for the script.
+
+=item --usage
+
+print a concise usage line and exit.
+
+=item --version
+
+print the version of the script.
+
+=back
+
+=head1 DIAGNOSTICS
+
+=for l'autore, da riempire:
+   Elencate qualunque singolo errore o messaggio di avvertimento che
+   lo script può generare, anche quelli che non "accadranno mai".
+   Includete anche una spiegazione completa di ciascuno di questi
+   problemi, una o più possibili cause e qualunque rimedio
+   suggerito.
+
+
+=over
+
+=item C<< Error message here, perhaps with %s placeholders >>
+
+[Descrizione di un errore]
+
+=item C<< Another error message here >>
+
+[Descrizione di un errore]
+
+[E così via...]
+
+=back
+
+
+=head1 CONFIGURATION AND ENVIRONMENT
+
+=for l'autore, da riempire:
+   Una spiegazione completa di qualunque sistema di configurazione
+   utilizzato dallo script, inclusi i nomi e le posizioni dei file di
+   configurazione, il significato di ciascuna variabile di ambiente
+   utilizzata e proprietà che può essere impostata. Queste descrizioni
+   devono anche includere dettagli su eventuali linguaggi di configurazione
+   utilizzati.
+  
+perl-builder requires no configuration files or environment variables.
+
+
+=head1 DEPENDENCIES
+
+=for l'autore, da riempire:
+   Una lista di tutti i moduli su cui si basa questo script,
+   incluse eventuali restrizioni sulle relative versioni, ed una
+   indicazione se il modulo in questione è parte della distribuzione
+   standard di Perl, parte della distribuzione del modulo o se
+   deve essere installato separatamente.
+
+None.
+
+
+=head1 BUGS AND LIMITATIONS
+
+=for l'autore, da riempire:
+   Una lista di tutti i problemi conosciuti relativi al modulo,
+   insime a qualche indicazione sul fatto che tali problemi siano
+   plausibilmente risolti in una versione successiva. Includete anche
+   una lista delle restrizioni sulle funzionalità fornite dal
+   modulo: tipi di dati che non si è in grado di gestire, problematiche
+   relative all'efficienza e le circostanze nelle quali queste possono
+   sorgere, limitazioni pratiche sugli insiemi dei dati, casi
+   particolari che non sono (ancora) gestiti, e così via.
+
+No bugs have been reported.
+
+Please report any bugs or feature requests through http://rt.cpan.org/
+
+
+=head1 AUTHOR
+
+Flavio Poletti C<polettix@cpan.org>
+
+
+=head1 LICENCE AND COPYRIGHT
+
+Copyright (c) 2015, Flavio Poletti C<polettix@cpan.org>.
+
+This module is free software.  You can redistribute it and/or
+modify it under the terms of the Artistic License 2.0.
+
+This program is distributed in the hope that it will be useful,
+but without any warranty; without even the implied warranty of
+merchantability or fitness for a particular purpose.
+
+=cut
