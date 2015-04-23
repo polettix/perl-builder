@@ -1,0 +1,192 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use Carp;
+use Pod::Usage qw< pod2usage >;
+use Getopt::Long qw< :config gnu_getopt >;
+use English qw< -no_match_vars >;
+my $VERSION = '0.0.1';
+
+use Log::Log4perl::Tiny qw< :easy :no_extra_logdie_message >;
+Log::Log4perl->easy_init({level => $INFO, layout => '[%d %-5p] %m%n'});
+use Path::Tiny qw< path cwd >;
+use Cwd qw< abs_path >;
+
+my %config = ();
+GetOptions(
+   \%config,
+   qw<
+     usage! help! man! version!
+     relocate|r=s
+     >
+) or pod2usage(-verbose => 99, -sections => 'USAGE');
+pod2usage(message => "$0 $VERSION", -verbose => 99, -sections => ' ')
+  if $config{version};
+pod2usage(-verbose => 99, -sections => 'USAGE') if $config{usage};
+pod2usage(-verbose => 99, -sections => 'USAGE|EXAMPLES|OPTIONS')
+  if $config{help};
+pod2usage(-verbose => 2) if $config{man};
+
+# Script implementation here
+# some useful paths
+my $ME      = path(abs_path(__FILE__));
+my $MYDIR   = $ME->parent();
+my $BASEDIR = path($ENV{OLD_PWD})->absolute();
+
+my $pack = get_package();
+my $target = resolve_target($ARGV[0] || $pack->{name});
+compile_and_install($pack, $target);
+
+sub compile_and_install {
+   my ($pack, $target) = @_;
+   my $start = cwd();
+   my $build = $start->child('build');
+   $build->mkpath();
+   mysystem(qw< tar xvC build -f >, $pack->{path});
+
+   {
+      ccd($build->child($pack->{name}));
+      mysystem(
+         qw<
+           sh Configure
+           -des
+           -Duserelocatableinc
+           -Dman1dir=none
+           -Dman3dir=none
+           >,
+         "-Dprefix=$target"
+      );
+      mysystem('make');
+      mysystem(qw< make install >);
+      ccd($start);
+   }
+
+   my $site_perl = $target->child(qw< lib site_perl >);
+   $site_perl->remove_tree();
+   $site_perl->touch();
+
+   for my $ancillary (qw< cpanm relocate >) {
+      my $target_ancillary = $target->child('bin', $ancillary);
+      path($ancillary)->copy($target_ancillary);
+      relocate_script($target_ancillary, $target->child(qw< bin perl >));
+   }
+} ## end sub compile_and_install
+
+sub relocate_script {
+   my ($file, $perl) = @_;
+   $file = path($file);
+   my $contents = $file->slurp_raw();
+   my $fh       = $file->openw_raw();
+   print {$fh} <<"END_OF_PREAMBLE" or die "print(): $OS_ERROR";
+#!$perl
+   eval 'exec $perl -S \$0 \${1+"\$@"}'
+      if \$running_under_some_shell;
+END_OF_PREAMBLE
+   print {$fh} $contents or die "print(): $OS_ERROR";
+   close $fh or die "close(): $OS_ERROR";
+   return;
+} ## end sub relocate_script
+
+sub mysystem {
+   my @command = @_;
+   INFO "calling @command";
+   my $retval = system {$command[0]} @command;
+   LOGDIE "exited with error $retval: @command"
+     if $retval;
+   return;
+} ## end sub mysystem
+
+sub get_package {
+   my $it = $MYDIR->iterator();
+   while (my $item = $it->()) {
+      my $name = $item->basename();
+      my ($packname, $version) =
+        $name =~ m{\A (perl- ([\d.]+)) \.tar\.(?: gz | bz2 ) \z}mxs
+        or next;
+      return {
+         path    => $item,
+         name    => $packname,
+         version => $version,
+      };
+   } ## end while (my $item = $it->)
+   LOGDIE "cannot find a suitable perl package in $MYDIR";
+   return;    # unreached
+} ## end sub get_package
+
+sub resolve_target {
+   my ($target) = @_;
+
+   {
+      my $start = cwd();
+      ccd $BASEDIR;
+      $target = path($target)->absolute();
+      ccd $start;
+   }
+
+   if ($target->is_directory()) {
+      WARN "target $target already exists";
+   }
+   else {
+      $target->mkpath();    # will complain on errors
+   }
+   return $target;
+} ## end sub resolve_target
+
+sub ccd {
+   chdir $_[0] or die "chdir(): $OS_ERROR";
+}
+
+__END__
+ME=$(readlink -f "$0")
+MYDIR=$(dirname "$ME")
+PACK=$(ls "$MYDIR"/perl-*.tar.*)
+
+die() {
+   echo "$*" >&2
+   exit 1
+}
+
+packname() {
+   local fullname=$1
+   basename "$fullname" | sed 's/\.tar\.\(bz2\|gz\)$//'
+}
+
+resolve_target() {
+   local target=$1
+   local packfile=$2
+   if [ -z "$target" ] ; then
+      target=$(packname "$packfile")
+   fi
+   [ -n "$OLD_PWD" ] || die "OLD_PWD is empty..."
+   cd "$OLD_PWD" || die "cannot hop back into $OLDPWD"
+   [ -e "$target" ] && die "target '$target' exists"
+   mkdir -p "$target"
+   readlink -f "$target"
+}
+
+compile_and_install() {
+   local package=$1
+   local target=$2
+   local startdir=$PWD
+   subdir=$(packname "$package")
+   mkdir build &&
+   tar xvf "$package" -C build &&
+   cd "build/$subdir" &&
+   sh Configure -des -Drelocatableinc -Dprefix="$target" &&
+   make &&
+   make install &&
+   cd "$target" &&
+   rm -rf man &&
+   cd lib &&
+   rm -rf site_perl &&
+   touch site_perl &&
+   cd "$startdir" &&
+   rm -rf build &&
+   sed -e "1s#.*#\#!$target/bin/perl#" cpanm >"$target/bin/cpanm" &&
+   chmod +x "$target/bin/cpanm"
+}
+
+TARGET=$(resolve_target "$1" "$PACK")
+[ $? -eq 0 ] || die 'bailing out'
+[ -n "$TARGET" ] || die 'bailing out'
+compile_and_install "$PACK" "$TARGET" || die 'something went wrong'
