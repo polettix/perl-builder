@@ -54,6 +54,13 @@ a specific version of Perl, as opposed to having a script (e.g.
 perlbrew or perl-build) that is capable, alone, of installing many
 different perls.
 
+## Opinionated Installation
+
+To start the installation, just run the generated builder program. By
+default it will be installed in a subdirectory of the current one, named
+after the perl tarball contained in the builder; you can pass one single
+(optional) path to install somewhere else.
+
 The installation process is somehow _opinionated_, subject to change
 in the future (most probably by adding options):
 
@@ -93,6 +100,27 @@ needed for a project in a per-project tree. For doing this, `cpanm`
 is very useful. I usually don't need the man pages (`perldoc` FTW!)
 and I might need to move the installed perl to some other location
 later.
+
+## Builder Goodies
+
+The builder program is generated using `deployable` (you can
+find some info here: [http://blog.polettix.it/parachuting-whatever/](http://blog.polettix.it/parachuting-whatever/)), so
+it provides you its goodies.
+
+As an added bonus, the builder also carries the tools for tweaking it
+and re-generate the builder itself. A typical workflow for making tweaks
+would be like this (suppose you are using builder
+`perl-build-5.20.2.pl`):
+
+    shell$ ./perl-build-5.20.2.pl --inspect here
+    # some lines are printed... and directory here is created
+    shell$ cd here
+    # here you do your tweaking. When ready, we can generate a
+    # new builder like this:
+    shell$ ./regenerate ../perl-build-5.20.2-tweaked.pl
+
+In this way you can e.g. modify the `installer` program, that is the
+real workhorse in the installation process.
 
 # OPTIONS
 
