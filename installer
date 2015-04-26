@@ -62,6 +62,7 @@ compile_and_install($pack, $target);
 sub compile_and_install {
    my ($pack, $target) = @_;
    my $start = getcwd();
+
    my $build = child($start, 'build');
    mkdir $build or die "mkdir(): $OS_ERROR\n";
    mysystem(qw< tar xvC build -f >, $pack->{path});
@@ -88,7 +89,8 @@ sub compile_and_install {
    open my $fh, '>', $site_perl or die "open('$site_perl'): $OS_ERROR\n";
    close $fh or die "close() on '$site_perl': $OS_ERROR\n";
 
-   for my $ancillary (qw< cpanm relocate >) {
+   my @ancillaries = split /\n/, slurp_raw('ancillaries.txt');
+   for my $ancillary (@ancillaries, 'relocate') {
       my $target_ancillary = child($target, 'bin', $ancillary);
       copy($ancillary, $target_ancillary);
       chmod 0755, $target_ancillary;

@@ -10,12 +10,16 @@ my @me    = splitpath(abs_path(__FILE__));
 my $mydir = catpath(@me[0, 1], '');
 chdir $mydir or die "chdir(): $!";
 
+open my $fh, '<:raw', 'ancillaries.txt'
+   or die "open('ancillaries.txt'): $!";
+my @ancillaries = map { chomp; $_ } <$fh>;
+close $fh;
+
 my $deployable = catpath(@me[0, 1], 'deployable');
 
 my ($package) = <perl-*.tar.*>;
-system {$deployable} $deployable, qw<
-  cpanm
-  deployable
+system {$deployable} $deployable, @ancillaries, qw<
+  ancillaries.txt
   installer
   relocate
   regenerate

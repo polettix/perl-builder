@@ -19,17 +19,19 @@ use File::chdir;
 use Path::Tiny qw< path cwd >;
 use Cwd qw< abs_path >;
 
+my $myself = path(abs_path(__FILE__));
 my %config = (
-   cpanm => 'http://cpanmin.us/',
+   ancillaries => $myself->sibling('ancillaries.conf')->stringify(),
    mirror => 'http://www.cpan.org/',
    path   => '/src/5.0/',
-   myself => path(abs_path(__FILE__)),
+   myself => $myself,
 );
 GetOptions(
    \%config,
    qw<
      usage! help! man! version!
-     cpanm=s
+     ancillaries|a=s
+     whateveries=s
      mirror|m=s
      output|o=s
      path|p=s
@@ -73,17 +75,21 @@ sub prepare_package {
 
    my $filename = fetch_archive($c->{source});
 
-   fetch_cpanm($c);
+   my $position_for = load_ancillaries($c);
+   open my $afh, '>:raw', 'ancillaries.txt'
+      or die "open('ancillaries.txt'): $OS_ERROR";
+   while (my ($name, $position) = each %$position_for) {
+      fetch_ancillary($c, $name, $position);
+      cwd->child($name)->chmod('a=rx,u+w');
+      print {$afh} "$name\n";
+   }
+   close $afh;
 
    my $myself = $c->{myself};
-   my $deployable = $myself->sibling('deployable');
-   $deployable->copy('deployable');
-
-   my @companions = qw< cpanm deployable regenerate relocate installer >;
-   for my $name (@companions) {
-      my $target = cwd->child($name);
-      $myself->sibling($name)->copy($target)
-         unless $target->exists();
+   for my $name (qw< installer regenerate relocate >) {
+      my $target = cwd()->child($name);
+      next if -e $target;
+      $myself->sibling($name)->copy($target);
       $target->chmod('a=rx,u+w');
    }
 
@@ -103,46 +109,6 @@ sub fetch_archive {
    die "errors getting $source: ", $response->status_line()
       unless $response->is_success();
    return $filename;
-}
-
-sub fetch_cpanm {
-   my ($c) = @_;
-
-   my $source = $c->{cpanm};
-   my $fallback = $c->{myself}->sibling('cpanm');
-   $source = $fallback if $source eq 'local';
-   INFO "getting cpanm from $source";
-
-   my $uri = URI->new($source);
-   if ($uri->has_recognized_scheme()) {
-      eval {
-         my $ua = WWW::Mechanize->new(timeout => 10, autocheck => 1);
-         $ua->get($uri);
-         open my $fh, '>:raw', 'cpanm' or die "open('cpanm'): $OS_ERROR\n";
-         print {$fh} $ua->content(charset => 'none')
-            or die "print() to 'cpanm': $OS_ERROR\n";
-         close $fh or die "close() on 'cpanm': $OS_ERROR\n";
-         INFO "success";
-         1;
-      } and return;
-      ERROR $EVAL_ERROR if $EVAL_ERROR;
-   }
-   else {
-      INFO "not a recognized scheme, assuming it's a local path";
-      {
-         local $CWD = $c->{myself}->parent()->stringify();
-         $source = path($source)->absolute();
-      }
-      if ($source->is_file() && -r $source) {
-         $source->copy('cpanm');
-         return;
-      }
-   }
-
-   # fetching was not successful
-   INFO "errors fetching from $source, fallback to $fallback";
-   $fallback->copy('cpanm');
-   return;
 }
 
 sub get_uri_for {
@@ -189,6 +155,70 @@ sub get_uri_for {
    # dunno what to do here...
    LOGDIE "unrecognized '$wanted'";
 } ## end sub get_uri_for
+
+
+############### ANCILLARIES ######################################
+
+sub load_ancillaries {
+   my ($c) = shift;
+
+   my %position_for = (
+      deployable => $c->{myself}->sibling('deployable'),
+   );
+
+   my $filename = $c->{ancillaries};
+   if (-e $filename) {
+      open my $fh, '<:encoding(utf-8)', $filename
+         or die "open('$filename'): $OS_ERROR";
+      while (<$fh>) {
+         s{\A\s+|\s+\z}{}gxms;
+         my ($what, $uri) = split /\s*:\s*/mxs, $_, 2;
+         s{\A(['"])(.*)\1\z}{$2}mxs for ($what, $uri);
+         $position_for{$what} = $uri;
+      }
+   }
+
+   return \%position_for;
+}
+
+sub fetch_ancillary {
+   my ($c, $name, $source) = @_;
+
+   my $fallback = $c->{myself}->sibling($name);
+   $source = $fallback if $source eq '*local*';
+   INFO "getting $name from $source";
+
+   my $uri = URI->new($source);
+   if ($uri->has_recognized_scheme()) {
+      eval {
+         my $ua = WWW::Mechanize->new(timeout => 10, autocheck => 1);
+         $ua->get($uri);
+         open my $fh, '>:raw', $name or die "open('$name'): $OS_ERROR\n";
+         print {$fh} $ua->content(charset => 'none')
+            or die "print() to 'cpanm': $OS_ERROR\n";
+         close $fh or die "close() on 'cpanm': $OS_ERROR\n";
+         INFO "success";
+         1;
+      } and return;
+      ERROR $EVAL_ERROR if $EVAL_ERROR;
+   }
+   else {
+      INFO "not a recognized scheme, assuming it's a local path";
+      {
+         local $CWD = $c->{myself}->parent()->stringify();
+         $source = path($source)->absolute();
+      }
+      if ($source->is_file() && -r $source) {
+         $source->copy($name);
+         return;
+      }
+   }
+
+   # fetching was not successful
+   INFO "errors fetching $name from $source, fallback to $fallback";
+   $fallback->copy($name);
+   return;
+}
 
 __END__
 
