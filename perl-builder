@@ -65,7 +65,7 @@ sub prepare_package {
       $output = $c->{output};
    }
    else {
-      my ($version) = $source =~ m{perl-([\d.]+)\.tar\.(?:bz2|gz)\z}mxs;
+      my ($version) = $source =~ m{perl-([^/]+)\.tar\.(?:bz2|gz)\z}mxs;
       $output = "perl-builder-$version.pl";
    }
    $output = path($output)->absolute();

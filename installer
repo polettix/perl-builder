@@ -145,7 +145,7 @@ sub get_package {
    for my $name (readdir $dh) {
       my $item = child($MYDIR, $name);
       my ($packname, $version) =
-        $name =~ m{\A (perl- ([\d.]+)) \.tar\.(?: gz | bz2 ) \z}mxs
+        $name =~ m{\A (perl- ([^/]+)) \.tar\.(?: gz | bz2 ) \z}mxs
         or next;
       return {
          path    => $item,
